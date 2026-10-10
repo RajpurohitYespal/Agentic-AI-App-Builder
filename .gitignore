@@ -1,0 +1,12 @@
+
+# clerk configuration (can include secrets)
+/.clerk/
+
+.env
+.env.*
+!.env.example
+
+node_modules/
+.next/
+.vercel/
+out/
