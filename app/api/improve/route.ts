@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
 import { Agent, createTool } from "@cline/sdk";
@@ -23,7 +25,7 @@ export async function POST(request: NextRequest) {
   const { userId, workspaceId, userRequest, fileData } = body as {
     userId: string;
     workspaceId: string;
-    userRequest: string; // what the user wants improved
+    userRequest: string;
     fileData: FileData;
   };
 
@@ -37,7 +39,6 @@ export async function POST(request: NextRequest) {
   if (!user)
     return Response.json({ message: "User not found" }, { status: 404 });
 
-  // Pro-only gate
   if (user.plan !== "pro")
     return Response.json({ message: "Upgrade required" }, { status: 403 });
 
@@ -53,16 +54,10 @@ export async function POST(request: NextRequest) {
       const enqueue = (chunk: string) =>
         controller.enqueue(encoder.encode(chunk));
 
-      // Accumulate file patches as the agent calls update_file
       const patchedFiles: Record<string, { code: string }> = {
         ...fileData.files,
       };
       let finalSummary = "";
-
-      // ── Tool 1: update_file ──────────────────────────────────────────────
-      // The agent calls this once per file it wants to change.
-      // We immediately emit a file_patch SSE event so Sandpack
-      // updates live in the browser as each file is patched.
 
       const updateFileTool = createTool({
         name: "update_file",
@@ -79,16 +74,10 @@ export async function POST(request: NextRequest) {
         }),
         async execute({ path, code, reason }) {
           patchedFiles[path] = { code };
-          // Emit live patch — client applies it to Sandpack immediately
           enqueue(sseEvent("file_patch", { path, code, reason }));
           return `Updated ${path}: ${reason}`;
         },
       });
-
-      // ── Tool 2: done_improving ───────────────────────────────────────────
-      // Agent calls this when all files are updated.
-      // lifecycle.completesRun: true tells the Cline SDK loop to stop
-      // immediately after this tool runs instead of continuing iterations.
 
       const doneImprovingTool = createTool({
         name: "done_improving",
@@ -107,10 +96,6 @@ export async function POST(request: NextRequest) {
           return "Done.";
         },
       });
-
-      // ── Serialize current files for context ──────────────────────────────
-      // We give the agent all current files as context in the system prompt
-      // so it knows exactly what it's working with.
 
       const fileContext = Object.entries(fileData.files)
         .map(([path, { code }]) => `// ${path}\n${code}`)
@@ -141,9 +126,9 @@ RULES:
 - Always write complete file contents — never partial snippets.
 - Keep all existing functionality unless asked to remove it.
 - The entry point is always /App.js with a default export.
-- All imports must reference files you've updated or packages in the available list above.`,
+- All imports must reference files you've updated or packages in the available list above.
+`,
         tools: [updateFileTool, doneImprovingTool],
-        // Auto-approve both tools — no human-in-the-loop needed in this context
         toolPolicies: {
           update_file: { autoApprove: true },
           done_improving: { autoApprove: true },
@@ -151,17 +136,11 @@ RULES:
       });
 
       try {
-        // ── Stream agent reasoning to chat panel ─────────────────────────
-        // assistant-text-delta fires as the agent types its reasoning.
-        // We emit these as "thinking" events — shown in the chat panel
-        // as a live streaming message so users see the agent working.
-
         agent.subscribe((event) => {
           if (event.type === "assistant-text-delta" && event.text) {
             enqueue(sseEvent("thinking", { text: event.text }));
           }
 
-          // This fires reliably every time a tool is called
           if (event.type === "tool-started") {
             const name = event.toolCall?.toolName;
             if (name === "update_file") {
@@ -178,7 +157,6 @@ RULES:
           }
         });
 
-        // ── Run the agent ─────────────────────────────────────────────────
         enqueue(sseEvent("status", { message: "Cline agent starting…" }));
 
         const result = await agent.run(userRequest);
@@ -186,8 +164,6 @@ RULES:
         if (result.status === "failed") {
           throw new Error(result.error?.message ?? "Agent run failed");
         }
-
-        // ── Deduct credit + save to DB ────────────────────────────────────
 
         const newFileData: FileData = {
           files: patchedFiles,
@@ -210,8 +186,6 @@ RULES:
           where: { id: userId },
           select: { credits: true },
         });
-
-        // ── Final done event ──────────────────────────────────────────────
 
         enqueue(
           sseEvent("done", {
@@ -243,6 +217,3 @@ RULES:
     },
   });
 }
-
-export const runtime = "nodejs";
-export const maxDuration = 300; // for vercel - 300s on Fluid

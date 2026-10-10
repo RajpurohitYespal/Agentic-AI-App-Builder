@@ -1,10 +1,11 @@
+export const dynamic = "force-dynamic";
+
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
 import type { Message, FileData } from "@/types/workspace";
-import { aj } from "@/lib/arcjet";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
@@ -15,15 +16,11 @@ function sseEvent(type: string, payload: unknown): string {
 }
 
 // ─── Extract short label from a Gemini thought chunk ─────────────────────────
-// Gemini thoughts often start with a bold heading like **Verify Config**
-// We extract that. If no bold heading, take the first sentence only.
 
 function extractThoughtLabel(text: string): string | null {
-  // Try to grab **bold heading** at the start
   const boldMatch = text.match(/\*\*([^*]{4,60})\*\*/);
   if (boldMatch) return boldMatch[1].trim();
 
-  // Fall back to first sentence (up to first . or \n), capped at 60 chars
   const sentence = text.split(/[.\n]/)[0].trim();
   if (sentence.length >= 8 && sentence.length <= 80) return sentence;
 
@@ -137,30 +134,6 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "No messages provided" }, { status: 400 });
   }
 
-  // ── Arcjet: rate limit, prompt injection, sensitive info ──────────────────
-  // detectPromptInjectionMessage requires the actual user text to inspect.
-
-  // const arcjetReq = new Request(request.url, {
-  //   method: request.method,
-  //   headers: request.headers,
-  //   body: JSON.stringify(body),
-  // });
-
-  // const lastUserMessage =
-  //   [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  // const decision = await aj.protect(arcjetReq, {
-  //   requested: 1,
-  //   userId: clerkId,
-  //   detectPromptInjectionMessage: lastUserMessage,
-  // });
-
-  // if (decision.isDenied()) {
-  //   return Response.json(
-  //     { message: decision.reason?.type ?? "Request blocked" },
-  //     { status: 429 }
-  //   );
-  // }
-
   const user = await db.user.findUnique({
     where: { id: userId, clerkId },
     select: { id: true, credits: true },
@@ -195,8 +168,8 @@ export async function POST(request: NextRequest) {
           },
         });
 
-        let accumulated = ""; // final JSON output
-        let lastEmitTime = 0; // throttle thought emissions
+        let accumulated = "";
+        let lastEmitTime = 0;
 
         for await (const chunk of geminiStream) {
           const parts = chunk.candidates?.[0]?.content?.parts ?? [];
@@ -205,7 +178,6 @@ export async function POST(request: NextRequest) {
             if (!part.text) continue;
 
             if (part.thought) {
-              // Extract just the short label — not the full wall of text
               const now = Date.now();
               if (now - lastEmitTime > 600) {
                 const label = extractThoughtLabel(part.text);
@@ -215,7 +187,6 @@ export async function POST(request: NextRequest) {
                 }
               }
             } else {
-              // Actual JSON output
               accumulated += part.text;
             }
           }
@@ -269,7 +240,7 @@ export async function POST(request: NextRequest) {
           title: aiTitle,
         };
 
-        // ── Upsert workspace + deduct credit (single transaction) ──────────────
+        // ── Upsert workspace + deduct credit ──────────────────────────────────
 
         enqueue(sseEvent("status", { message: "Saving…" }));
 
@@ -339,6 +310,3 @@ export async function POST(request: NextRequest) {
     },
   });
 }
-
-export const runtime = "nodejs";
-export const maxDuration = 300; // for vercel - 300s on Fluid
